@@ -1,0 +1,68 @@
+.wood-color {
+  color: #07e930;
+}
+
+.gold-color {
+  color: #ef9104;
+}
+
+.soil-color {
+  color: #8b6d03;
+}
+
+.water-color {
+  color: #2e83f6;
+}
+
+.fire-color {
+  color: #d30505;
+}
+
+.main-color {
+  color: #b2955d;
+}
+
+.main-bg {
+  background-color: #b2955d;
+}
+
+.pro-pan-content-table .pro-pan-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 5px 0;
+  font-size: 15px;
+
+  .paipan-title-color {
+    color: #9e9e9e;
+  }
+
+  .pro-pan-row-item {
+    flex: 1;
+    white-space: nowrap;
+    display: flex;
+    flex-direction: column;
+    align-self: flex-start;
+  }
+
+  .base-pan-row {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 8px 0;
+    font-size: 15px;
+    color: #000;
+  }
+
+  .col-title {
+    width: 50px;
+    flex-shrink: 0;
+  }
+
+  .col-extra {
+    width: 50px;
+    flex-shrink: 0;
+    text-align: center;
+    font-size: 14px;
+  }
+}
