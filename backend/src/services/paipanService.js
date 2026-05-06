@@ -16,15 +16,83 @@ const {
 } = require('../utils/bazi');
 const pool = require('../config/db');
 
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
+function parseBirthTime(birthTime) {
+  if (typeof birthTime === 'number') {
+    return { hour: birthTime, minute: 0 };
+  }
+
+  const text = String(birthTime || '0:00');
+  const [hour = '0', minute = '0'] = text.split(':');
+  return {
+    hour: Math.min(Math.max(parseInt(hour, 10) || 0, 0), 23),
+    minute: Math.min(Math.max(parseInt(minute, 10) || 0, 0), 59),
+  };
+}
+
+function formatDate(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function formatTime(date) {
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+function formatGmtOffset(minutes = 480) {
+  const sign = minutes >= 0 ? '+' : '-';
+  const abs = Math.abs(minutes);
+  return `GMT${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+}
+
+function getTimeContext(birthDate, birthTime, longitude, gmtOffsetMinutes = 480) {
+  const { hour, minute } = parseBirthTime(birthTime);
+  const [year, month, day] = birthDate.split('-').map(Number);
+  const standardDateTime = new Date(year, month - 1, day, hour, minute, 0);
+  const lng = longitude === null || longitude === undefined || longitude === '' ? null : Number(longitude);
+  const longitudeCorrectionMinutes = Number.isFinite(lng) ? Math.round((lng - 120) * 4) : 0;
+  const localMeanDateTime = new Date(standardDateTime.getTime() + longitudeCorrectionMinutes * 60000);
+
+  return {
+    inputDate: birthDate,
+    inputTime: `${pad2(hour)}:${pad2(minute)}`,
+    calculateDate: formatDate(localMeanDateTime),
+    calculateTime: formatTime(localMeanDateTime),
+    calculateHour: localMeanDateTime.getHours(),
+    longitude: lng,
+    longitudeCorrectionMinutes,
+    timezoneName: '北京时间',
+    gmtOffsetMinutes: Number(gmtOffsetMinutes) || 480,
+    gmtOffsetLabel: formatGmtOffset(Number(gmtOffsetMinutes) || 480),
+    localMeanTime: `${formatDate(localMeanDateTime)} ${formatTime(localMeanDateTime)}`,
+  };
+}
+
 /**
  * 八字排盘核心计算
  */
-exports.calculate = async ({ name, gender, birthDate, birthTime, birthPlace }) => {
+exports.calculate = async ({
+  name,
+  gender,
+  birthDate,
+  birthTime,
+  birthPlace,
+  regionCode,
+  regionName,
+  longitude,
+  latitude,
+  timezoneName = '北京时间',
+  gmtOffsetMinutes = 480,
+}) => {
+  const timeContext = getTimeContext(birthDate, birthTime, longitude, gmtOffsetMinutes);
+
   // 1. 公历转农历
-  const lunar = solarToLunar(birthDate);
+  const lunar = solarToLunar(timeContext.calculateDate, timeContext.calculateHour);
 
   // 2. 计算八字（四柱）
-  const bazi = getBazi(birthDate, birthTime, gender);
+  const bazi = getBazi(timeContext.calculateDate, timeContext.calculateHour, gender);
 
   // 3. 计算十神
   const shishen = getShishen(bazi);
@@ -48,14 +116,27 @@ exports.calculate = async ({ name, gender, birthDate, birthTime, birthPlace }) =
   const kongwang = getKongwang(bazi);
 
   // 10. 计算大运
-  const dayun = getDayun(bazi, gender, birthDate, birthTime);
+  const dayun = getDayun(bazi, gender, timeContext.calculateDate, timeContext.calculateHour);
 
   const result = {
     name,
     gender,
     birthDate,
-    birthTime,
+    birthTime: timeContext.inputTime,
     birthPlace,
+    region: {
+      code: regionCode || '',
+      name: regionName || birthPlace || '',
+      longitude: timeContext.longitude,
+      latitude: latitude === null || latitude === undefined || latitude === '' ? null : Number(latitude),
+      timezoneName,
+      gmtOffsetMinutes: timeContext.gmtOffsetMinutes,
+      gmtOffsetLabel: timeContext.gmtOffsetLabel,
+      longitudeCorrectionMinutes: timeContext.longitudeCorrectionMinutes,
+      localMeanTime: timeContext.localMeanTime,
+    },
+    calculateDate: timeContext.calculateDate,
+    calculateTime: timeContext.calculateTime,
     lunar,
     bazi,
     shishen,
@@ -77,6 +158,7 @@ exports.calculate = async ({ name, gender, birthDate, birthTime, birthPlace }) =
 exports.saveRecord = async (userId, inputData, result) => {
   const { name, gender, birthDate, birthTime, birthPlace } = inputData;
   const { lunar, bazi } = result;
+  const { hour } = parseBirthTime(birthTime);
 
   const sql = `
     INSERT INTO paipan_record 
@@ -92,7 +174,7 @@ exports.saveRecord = async (userId, inputData, result) => {
     name || null,
     gender,
     birthDate,
-    birthTime,
+    hour,
     birthPlace || null,
     lunar?.lunarYear || null,
     lunar?.lunarMonth || null,

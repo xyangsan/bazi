@@ -33,8 +33,20 @@
         </el-form-item>
 
         <el-form-item label="出生地">
-          <el-input v-model="form.birthPlace" placeholder="请输入出生地（可选）" />
+          <el-input
+            v-model="form.birthPlace"
+            readonly
+            placeholder="请选择出生地（可选）"
+            class="birth-date-input"
+            @click="openRegionDialog"
+          />
         </el-form-item>
+
+        <div v-if="selectedRegion.name" class="region-meta">
+          <span>经纬度：{{ selectedRegion.longitude ?? '--' }} / {{ selectedRegion.latitude ?? '--' }}</span>
+          <span>{{ selectedRegion.timezoneName || '北京时间' }} GTMT：{{ selectedRegion.gmtOffsetLabel || 'GMT+08:00' }}</span>
+          <span>地方平太阳时：{{ selectedRegion.localMeanTime || '--' }}</span>
+        </div>
 
         <!-- 农历信息展示区 -->
         <div v-if="lunarInfo" class="lunar-info">
@@ -135,6 +147,99 @@
         </div>
       </div>
     </Teleport>
+
+    <Teleport to="body">
+      <div v-if="regionDialogVisible" class="birth-dialog-mask" @click.self="closeRegionDialog">
+        <div class="birth-dialog region-dialog">
+          <div class="birth-dialog-header region-dialog-header">
+            <span></span>
+            <button class="close-btn" type="button" @click="closeRegionDialog">
+              <el-icon><Close /></el-icon>
+            </button>
+          </div>
+
+          <div class="region-search-row">
+            <el-icon><Search /></el-icon>
+            <input
+              v-model="regionSearchText"
+              placeholder="搜索全国城市及地区"
+              @input="handleRegionSearch"
+            />
+          </div>
+
+          <div class="region-labels">
+            <span>省份</span>
+            <span>城市</span>
+            <span>区县</span>
+          </div>
+
+          <div v-if="regionSearchText.trim()" class="region-search-results">
+            <button
+              v-for="item in regionSearchResults"
+              :key="item.code"
+              type="button"
+              @click="selectSearchRegion(item)"
+            >
+              <span class="search-result-path">{{ item.displayPath || item.fullName || item.name }}</span>
+            </button>
+            <div v-if="!regionSearchResults.length" class="region-empty">暂无匹配地区</div>
+          </div>
+
+          <div v-else class="region-picker">
+            <div class="region-column">
+              <button
+                type="button"
+                :class="{ active: !draftRegion.province }"
+                @click="selectUnknownRegion"
+              >
+                未知地
+              </button>
+              <button
+                v-for="item in provinceList"
+                :key="item.code"
+                type="button"
+                :class="{ active: draftRegion.province?.code === item.code }"
+                @click="selectProvince(item)"
+              >
+                {{ item.name }}
+              </button>
+            </div>
+            <div class="region-column">
+              <button
+                v-for="item in cityList"
+                :key="item.code"
+                type="button"
+                :class="{ active: draftRegion.city?.code === item.code }"
+                @click="selectCity(item)"
+              >
+                {{ item.name }}
+              </button>
+            </div>
+            <div class="region-column">
+              <button
+                v-for="item in districtList"
+                :key="item.code"
+                type="button"
+                :class="{ active: draftRegion.district?.code === item.code }"
+                @click="selectDistrict(item)"
+              >
+                {{ item.name }}
+              </button>
+            </div>
+          </div>
+
+<!--          <div class="region-selected-card">
+            <strong>{{ draftRegionDisplay.name }}</strong>
+            <span>{{ draftRegionDisplay.timezoneName }}</span>
+            <span>{{ draftRegionDisplay.gmtOffsetLabel }}</span>
+          </div>-->
+
+          <button class="dialog-confirm-btn" type="button" @click="confirmRegion">
+            确定
+          </button>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -144,8 +249,9 @@ import { useRouter } from 'vue-router'
 import { usePaipanStore } from '@/store/paipan'
 import { useUserStore } from '@/store/user'
 import { calculatePaipan, savePaipan } from '@/api/paipan'
+import { getRegionChildren, searchRegions } from '@/api/region'
 import { ElMessage } from 'element-plus'
-import { Calendar, Close } from '@element-plus/icons-vue'
+import { Calendar, Close, Search } from '@element-plus/icons-vue'
 import { DI_ZHI } from './baziData'
 
 const router = useRouter()
@@ -155,10 +261,17 @@ const loading = ref(false)
 const saving = ref(false)
 const lunarInfo = ref(null)
 const dateDialogVisible = ref(false)
+const regionDialogVisible = ref(false)
 const calendarType = ref('solar')
 const birthDateTimeText = ref('')
 const manualDateTimeText = ref('')
 const wheelRefs = ref({})
+const regionSearchText = ref('')
+const regionSearchResults = ref([])
+const provinceList = ref([])
+const cityList = ref([])
+const districtList = ref([])
+let regionSearchTimer = null
 
 const calendarTabs = [
   { label: '公历', value: 'solar' },
@@ -211,6 +324,28 @@ const form = reactive({
   birthDate: '',
   birthTime: '',
   birthPlace: '',
+  regionCode: '',
+  longitude: null,
+  latitude: null,
+  timezoneName: '北京时间',
+  gmtOffsetMinutes: 480,
+})
+
+const selectedRegion = reactive({
+  code: '',
+  name: '',
+  longitude: null,
+  latitude: null,
+  timezoneName: '北京时间',
+  gmtOffsetMinutes: 480,
+  gmtOffsetLabel: 'GMT+08:00',
+  localMeanTime: '',
+})
+
+const draftRegion = reactive({
+  province: null,
+  city: null,
+  district: null,
 })
 
 const selectedDateTime = reactive({
@@ -430,6 +565,138 @@ function scrollAllWheelsToActive() {
   pickerColumns.value.forEach(column => scrollWheelToActive(column.key))
 }
 
+const draftRegionDisplay = computed(() => {
+  const region = draftRegion.district || draftRegion.city || draftRegion.province
+  if (!region) {
+    return {
+      name: '未知地',
+      timezoneName: '北京时间',
+      gmtOffsetLabel: 'GMT+08:00',
+    }
+  }
+
+  return {
+    name: region.fullName || region.name,
+    timezoneName: region.timezoneName || '北京时间',
+    gmtOffsetLabel: getGmtOffsetLabel(region.gmtOffsetMinutes),
+  }
+})
+
+function getGmtOffsetLabel(minutes = 480) {
+  const value = Number(minutes) || 480
+  const sign = value >= 0 ? '+' : '-'
+  const abs = Math.abs(value)
+  return `GMT${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`
+}
+
+function computeLocalMeanTime(longitude) {
+  if (longitude === null || longitude === undefined || longitude === '' || !form.birthDate || !form.birthTime) {
+    return ''
+  }
+
+  const [year, month, day] = form.birthDate.split('-').map(Number)
+  const [hour, minute = 0] = form.birthTime.split(':').map(Number)
+  const correction = Math.round((Number(longitude) - 120) * 4)
+  const date = new Date(year, month - 1, day, hour, minute + correction)
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+function applyRegion(region) {
+  selectedRegion.code = region?.code || ''
+  selectedRegion.name = region?.fullName || region?.name || ''
+  selectedRegion.longitude = region?.longitude ?? null
+  selectedRegion.latitude = region?.latitude ?? null
+  selectedRegion.timezoneName = region?.timezoneName || '北京时间'
+  selectedRegion.gmtOffsetMinutes = region?.gmtOffsetMinutes ?? 480
+  selectedRegion.gmtOffsetLabel = getGmtOffsetLabel(selectedRegion.gmtOffsetMinutes)
+  selectedRegion.localMeanTime = computeLocalMeanTime(selectedRegion.longitude)
+
+  form.birthPlace = selectedRegion.name
+  form.regionCode = selectedRegion.code
+  form.longitude = selectedRegion.longitude
+  form.latitude = selectedRegion.latitude
+  form.timezoneName = selectedRegion.timezoneName
+  form.gmtOffsetMinutes = selectedRegion.gmtOffsetMinutes
+}
+
+async function loadRegionChildren(parentCode, targetRef) {
+  try {
+    const res = await getRegionChildren(parentCode)
+    targetRef.value = res.data || []
+  } catch (err) {
+    targetRef.value = []
+  }
+}
+
+async function openRegionDialog() {
+  regionSearchText.value = ''
+  regionSearchResults.value = []
+  regionDialogVisible.value = true
+  if (!provinceList.value.length) {
+    await loadRegionChildren('', provinceList)
+  }
+}
+
+function closeRegionDialog() {
+  regionDialogVisible.value = false
+}
+
+function selectUnknownRegion() {
+  draftRegion.province = null
+  draftRegion.city = null
+  draftRegion.district = null
+  cityList.value = []
+  districtList.value = []
+}
+
+async function selectProvince(region) {
+  draftRegion.province = region
+  draftRegion.city = null
+  draftRegion.district = null
+  districtList.value = []
+  await loadRegionChildren(region.code, cityList)
+}
+
+async function selectCity(region) {
+  draftRegion.city = region
+  draftRegion.district = null
+  await loadRegionChildren(region.code, districtList)
+}
+
+function selectDistrict(region) {
+  draftRegion.district = region
+}
+
+async function handleRegionSearch() {
+  clearTimeout(regionSearchTimer)
+  const keyword = regionSearchText.value.trim()
+  if (!keyword) {
+    regionSearchResults.value = []
+    return
+  }
+
+  regionSearchTimer = setTimeout(async () => {
+    try {
+      const res = await searchRegions(keyword)
+      regionSearchResults.value = res.data || []
+    } catch (err) {
+      regionSearchResults.value = []
+    }
+  }, 200)
+}
+
+function selectSearchRegion(region) {
+  draftRegion.province = region.provinceCode ? { code: region.provinceCode, name: region.provinceName } : null
+  draftRegion.city = region.cityCode ? { code: region.cityCode, name: region.cityName } : null
+  draftRegion.district = region
+}
+
+function confirmRegion() {
+  const region = draftRegion.district || draftRegion.city || draftRegion.province
+  applyRegion(region)
+  closeRegionDialog()
+}
+
 watch(
   () => [selectedDateTime.year, selectedDateTime.month],
   () => {
@@ -441,6 +708,13 @@ watch(
 watch(calendarType, () => {
   nextTick(scrollAllWheelsToActive)
 })
+
+watch(
+  () => [form.birthDate, form.birthTime, selectedRegion.longitude],
+  () => {
+    selectedRegion.localMeanTime = computeLocalMeanTime(selectedRegion.longitude)
+  }
+)
 
 // 获取农历信息
 function updateLunarInfo() {
@@ -468,10 +742,13 @@ async function handleSubmit() {
 
   loading.value = true
   try {
-    const birthHour = parseInt(form.birthTime.split(':')[0])
     const res = await calculatePaipan({
       ...form,
-      birthTime: birthHour,
+      regionName: selectedRegion.name,
+      longitude: selectedRegion.longitude,
+      latitude: selectedRegion.latitude,
+      timezoneName: selectedRegion.timezoneName,
+      gmtOffsetMinutes: selectedRegion.gmtOffsetMinutes,
     })
     if (res.code === 0) {
       paipanStore.setInputInfo({ ...form })
@@ -514,8 +791,14 @@ async function handleSave() {
       name: form.name,
       gender: form.gender,
       birthDate: form.birthDate,
-      birthTime: parseInt(form.birthTime.split(':')[0]),
+      birthTime: form.birthTime,
       birthPlace: form.birthPlace,
+      regionCode: selectedRegion.code,
+      regionName: selectedRegion.name,
+      longitude: selectedRegion.longitude,
+      latitude: selectedRegion.latitude,
+      timezoneName: selectedRegion.timezoneName,
+      gmtOffsetMinutes: selectedRegion.gmtOffsetMinutes,
     })
     
     if (res.code === 0) {
@@ -581,6 +864,15 @@ onMounted(() => {
   :deep(.el-input__inner) {
     cursor: pointer;
   }
+}
+
+.region-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 10px 12px 80px;
+  color: #777;
+  font-size: 13px;
 }
 
 .lunar-info {
@@ -715,6 +1007,141 @@ onMounted(() => {
     &.active + button::before {
       display: none;
     }
+  }
+}
+
+.region-dialog-header {
+  grid-template-columns: 1fr 32px;
+}
+
+.region-tabs {
+  width: 176px;
+  justify-self: center;
+  grid-template-columns: 1fr;
+}
+
+.region-search-row {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  margin-bottom: 18px;
+  padding: 0 12px;
+  border-radius: 18px;
+  color: #8eb99b;
+  background: #d2ebd4;
+
+  input {
+    min-width: 0;
+    flex: 1;
+    height: 100%;
+    border: 0;
+    outline: none;
+    color: #48564d;
+    background: transparent;
+    font-size: 13px;
+
+    &::placeholder {
+      color: #6f9f7d;
+    }
+  }
+}
+
+.region-labels {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin-bottom: 8px;
+  color: #111;
+  font-size: 15px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.region-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  height: 206px;
+  overflow: hidden;
+}
+
+.region-column,
+.region-search-results {
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+
+  button {
+    display: block;
+    width: 100%;
+    min-height: 42px;
+    border: 0;
+    color: #d0d0d0;
+    background: transparent;
+    font-size: 14px;
+    font-weight: 500;
+    text-align: center;
+    cursor: pointer;
+  }
+
+  button.active {
+    color: #2d2d2d;
+    font-size: 18px;
+    font-weight: 800;
+  }
+}
+
+.region-search-results {
+  height: 206px;
+
+  button {
+    color: #333;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-height: 52px;
+    padding: 6px 12px;
+    
+    .search-result-path {
+      word-break: break-all;
+      line-height: 1.4;
+      
+      .highlight {
+        color: #b89758;
+        font-weight: 600;
+      }
+    }
+  }
+}
+
+.region-empty {
+  padding: 40px 0;
+  color: #aaa;
+  text-align: center;
+}
+
+.region-selected-card {
+  display: grid;
+  grid-template-columns: 1fr 1fr 70px;
+  align-items: center;
+  min-height: 46px;
+  margin-top: 10px;
+  padding: 0 12px;
+  border-radius: 4px;
+  background: #f4f4f4;
+  color: #2b2b2b;
+  font-size: 15px;
+
+  strong {
+    font-size: 18px;
+  }
+
+  span {
+    text-align: center;
+    font-weight: 700;
   }
 }
 
